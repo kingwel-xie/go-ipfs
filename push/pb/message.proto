@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package pushmanager.message.pb;
+
+message Message {
+
+  message Pushlist {
+    message Entry {
+			bytes block = 1;		// the block cid (cidV0 in bitswap 1.0.0, cidV1 in bitswap 1.1.0)
+			int32 priority = 2;	// the priority (normalized). default to 1
+		}
+
+    repeated Entry entries = 1;	// a list of wantlist entries
+  }
+
+  Pushlist pushlist = 1;
+}
