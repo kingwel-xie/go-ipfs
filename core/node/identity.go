@@ -2,6 +2,11 @@ package node
 
 import (
 	"fmt"
+	"github.com/ipfs/go-ipfs/core/node/helpers"
+	pushmanager "github.com/ipfs/go-ipfs/push"
+	format "github.com/ipfs/go-ipld-format"
+	"github.com/libp2p/go-libp2p-core/host"
+	"go.uber.org/fx"
 
 	"github.com/libp2p/go-libp2p-core/crypto"
 	"github.com/libp2p/go-libp2p-core/peer"
@@ -25,5 +30,16 @@ func PrivateKey(sk crypto.PrivKey) func(id peer.ID) (crypto.PrivKey, error) {
 			return nil, fmt.Errorf("private key in config does not match id: %s != %s", id, id2)
 		}
 		return sk, nil
+	}
+}
+
+func PushInterface(mctx helpers.MetricsCtx, lc fx.Lifecycle, host host.Host, dag format.DAGService) pushmanager.PushInterface {
+	return pushmanager.NewPushManager(helpers.LifecycleCtx(mctx, lc), host, dag)
+}
+
+func PushInterface2(host host.Host) func() (pushmanager.PushInterface, error) {
+	return func() (pushmanager.PushInterface, error) {
+		//pm := pushmanager.NewPushManager(host)
+		return nil, nil
 	}
 }

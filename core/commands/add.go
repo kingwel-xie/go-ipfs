@@ -247,6 +247,8 @@ only-hash, and progress/status related flags) will change the final hash.
 				h := ""
 				if output.Path != nil {
 					h = enc.Encode(output.Path.Cid())
+					n, _ := cmdenv.GetNode(env)
+					n.PushService.Push(req.Context, output.Path.Cid())
 				}
 
 				if !dir && addit.Name() != "" {

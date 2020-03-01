@@ -11,6 +11,7 @@ package core
 
 import (
 	"context"
+	pushmanager "github.com/ipfs/go-ipfs/push"
 	"io"
 
 	"github.com/ipfs/go-filestore"
@@ -96,6 +97,8 @@ type IpfsNode struct {
 	PSRouter *psrouter.PubsubValueStore `optional:"true"`
 	DHT      *dht.IpfsDHT               `optional:"true"`
 	P2P      *p2p.P2P                   `optional:"true"`
+
+	PushService     pushmanager.PushInterface  `optional:"true"`
 
 	Process goprocess.Process
 	ctx     context.Context

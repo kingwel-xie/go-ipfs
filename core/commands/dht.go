@@ -150,7 +150,6 @@ var findProvidersDhtCmd = &cmds.Command{
 		}
 
 		c, err := cid.Parse(req.Arguments[0])
-
 		if err != nil {
 			return err
 		}
