@@ -3,6 +3,7 @@ package pushmanager
 import (
 	"encoding/binary"
 	"fmt"
+	blocks "github.com/ipfs/go-block-format"
 	"io"
 
 	pb "github.com/ipfs/go-ipfs/push/pb"
@@ -21,13 +22,20 @@ type PushMessage interface {
 	// the sender.
 	Pushlist() []Entry
 
-	ToNetV1(w io.Writer) error
+	Allowlist() []Entry
+
+	// Blocks returns a slice of unique blocks.
+	Blocks() []blocks.Block
+
+	Send(w io.Writer) error
 
 	Loggable() map[string]interface{}
 }
 
 type impl struct {
 	pushlist map[cid.Cid]*Entry
+	allowlist map[cid.Cid]*Entry
+	blocks   map[cid.Cid]blocks.Block
 }
 
 // New returns a new, empty bitswap message
@@ -38,6 +46,8 @@ func New() PushMessage {
 func newMsg() *impl {
 	return &impl{
 		pushlist: make(map[cid.Cid]*Entry),
+		allowlist: make(map[cid.Cid]*Entry),
+		blocks: make(map[cid.Cid]blocks.Block),
 	}
 }
 
@@ -48,12 +58,39 @@ type Entry struct {
 
 func newMessageFromProto(pbm pb.Message) (PushMessage, error) {
 	m := newMsg()
-	for _, e := range pbm.Pushlist.Entries {
+	for _, e := range pbm.Pushlist {
 		c, err := cid.Cast([]byte(e.Block))
 		if err != nil {
 			return nil, fmt.Errorf("incorrectly formatted cid in wantlist: %s", err)
 		}
 		m.addEntry(c, int(e.Priority))
+	}
+
+	for _, e := range pbm.Allowlist {
+		c, err := cid.Cast([]byte(e.Block))
+		if err != nil {
+			return nil, fmt.Errorf("incorrectly formatted cid in wantlist: %s", err)
+		}
+		m.addAllowEntry(c, int(e.Priority))
+	}
+
+	for _, b := range pbm.GetPayload() {
+		pref, err := cid.PrefixFromBytes(b.GetPrefix())
+		if err != nil {
+			return nil, err
+		}
+
+		c, err := pref.Sum(b.GetData())
+		if err != nil {
+			return nil, err
+		}
+
+		blk, err := blocks.NewBlockWithCid(b.GetData(), c)
+		if err != nil {
+			return nil, err
+		}
+
+		m.AddBlock(blk)
 	}
 
 	return m, nil
@@ -62,6 +99,14 @@ func newMessageFromProto(pbm pb.Message) (PushMessage, error) {
 func (m *impl) Pushlist() []Entry {
 	out := make([]Entry, 0, len(m.pushlist))
 	for _, e := range m.pushlist {
+		out = append(out, *e)
+	}
+	return out
+}
+
+func (m *impl) Allowlist() []Entry {
+	out := make([]Entry, 0, len(m.allowlist))
+	for _, e := range m.allowlist {
 		out = append(out, *e)
 	}
 	return out
@@ -81,6 +126,30 @@ func (m *impl) addEntry(c cid.Cid, priority int) {
 				Priority: priority,
 		}
 	}
+}
+
+func (m *impl) addAllowEntry(c cid.Cid, priority int) {
+	e, exists := m.allowlist[c]
+	if exists {
+		e.Priority = priority
+	} else {
+		m.allowlist[c] = &Entry{
+			Cid:      c,
+			Priority: priority,
+		}
+	}
+}
+
+func (m *impl) Blocks() []blocks.Block {
+	bs := make([]blocks.Block, 0, len(m.blocks))
+	for _, block := range m.blocks {
+		bs = append(bs, block)
+	}
+	return bs
+}
+
+func (m *impl) AddBlock(b blocks.Block) {
+	m.blocks[b.Cid()] = b
 }
 
 // FromNet generates a new BitswapMessage from incoming data on an io.Reader.
@@ -108,19 +177,34 @@ func FromMsgReader(r msgio.Reader) (PushMessage, error) {
 
 func (m *impl) encode() *pb.Message {
 	pbm := new(pb.Message)
-	pbm.Pushlist = new(pb.Message_Pushlist)
-	pbm.Pushlist.Entries = make([]*pb.Message_Pushlist_Entry, 0, len(m.pushlist))
+	pbm.Pushlist = make([]pb.Message_Entry, 0, len(m.pushlist))
 	for _, e := range m.pushlist {
-		pbm.Pushlist.Entries = append(pbm.Pushlist.Entries, &pb.Message_Pushlist_Entry{
+		pbm.Pushlist = append(pbm.Pushlist, pb.Message_Entry{
 			Block:    e.Cid.Bytes(),
 			Priority: int32(e.Priority),
 		})
 	}
 
+	pbm.Allowlist = make([]pb.Message_Entry, 0, len(m.allowlist))
+	for _, e := range m.allowlist {
+		pbm.Allowlist = append(pbm.Allowlist, pb.Message_Entry{
+			Block:    e.Cid.Bytes(),
+			Priority: int32(e.Priority),
+		})
+	}
+
+	blocks := m.Blocks()
+	pbm.Payload = make([]pb.Message_Block, 0, len(blocks))
+	for _, b := range blocks {
+		pbm.Payload = append(pbm.Payload, pb.Message_Block{
+			Data:   b.RawData(),
+			Prefix: b.Cid().Prefix().Bytes(),
+		})
+	}
 	return pbm
 }
 
-func (m *impl) ToNetV1(w io.Writer) error {
+func (m *impl) Send(w io.Writer) error {
 	return write(w, m.encode())
 }
 

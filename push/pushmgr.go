@@ -2,16 +2,14 @@ package pushmanager
 
 import (
 	"context"
-	files "github.com/ipfs/go-ipfs-files"
+	blocks "github.com/ipfs/go-block-format"
+	blockstore "github.com/ipfs/go-ipfs-blockstore"
 	format "github.com/ipfs/go-ipld-format"
 	dag "github.com/ipfs/go-merkledag"
 	unixfile "github.com/ipfs/go-unixfs/file"
-	"github.com/pkg/errors"
-	//"fmt"
-	//"github.com/libp2p/go-libp2p-core/event"
+
 	"io"
 	"sync"
-	//"sync/atomic"
 	"time"
 
 	cid "github.com/ipfs/go-cid"
@@ -20,9 +18,8 @@ import (
 	"github.com/libp2p/go-libp2p-core/host"
 	"github.com/libp2p/go-libp2p-core/network"
 	"github.com/libp2p/go-libp2p-core/peer"
-	//peerstore "github.com/libp2p/go-libp2p-core/peerstore"
 	"github.com/libp2p/go-libp2p-core/protocol"
-	//"github.com/libp2p/go-libp2p-core/routing"
+	"github.com/libp2p/go-libp2p-core/routing"
 	msgio "github.com/libp2p/go-msgio"
 	ma "github.com/multiformats/go-multiaddr"
 )
@@ -44,7 +41,11 @@ type peerInstance struct {
 // The PushManager
 type PushManager struct {
 	host      	host.Host
+	routing 	routing.ContentRouting
 	dag			format.DAGService
+	blockstore	blockstore.Blockstore
+	wantlist	map[cid.Cid]struct{}
+
 	protocolId 	protocol.ID
 
 	ctx context.Context
@@ -52,18 +53,25 @@ type PushManager struct {
 	lock sync.Mutex // protects the connection map below
 	connMap map[peer.ID]*peerInstance
 
+	// ledgerMap lists Ledgers by their Partner key.
+	ledgerMap map[peer.ID]*ledger
+
 	addrMu sync.Mutex
 
 	mq chan pushMessage
 }
 
 // NewPushManager returns a PushManager supported by underlying IPFS host.
-func NewPushManager(parent context.Context, host host.Host, dag format.DAGService) *PushManager {
+func NewPushManager(parent context.Context, host host.Host, rt routing.Routing, dag format.DAGService, bs blockstore.Blockstore) *PushManager {
 	pm := &PushManager{
 		host:    host,
+		routing:	rt,
 		dag:	dag,
+		blockstore:		bs,
+		wantlist:	make(map[cid.Cid]struct{}),
 		protocolId:       protocolId,
 		connMap:	make(map[peer.ID]*peerInstance, 100),
+		ledgerMap:	make(map[peer.ID]*ledger, 100),
 		ctx:	parent,
 		mq:	make(chan pushMessage),
 	}
@@ -79,14 +87,40 @@ func NewPushManager(parent context.Context, host host.Host, dag format.DAGServic
 
 // Implement PushInterface
 func (pm *PushManager) Push(ctx context.Context, c cid.Cid) error {
+	return pm.PushMany(ctx, []cid.Cid{c})
+}
 
-	log.Debug("Push", c)
+func (pm *PushManager) PushAll(pushlist []cid.Cid, allowlist []cid.Cid, bs []blocks.Block) {
+	msg := newMsg()
 
-	entries := make([]cid.Cid, 0, 10)
-	entries = append(entries, c)
+	for _, e := range pushlist {
+		msg.AddEntry(e, 1)
+	}
+
+	for _, e := range allowlist {
+		msg.addAllowEntry(e, 1)
+	}
+
+	for _, b := range bs {
+		msg.AddBlock(b)
+	}
+
+	go pm.pushToPeer(pm.ctx, msg)
+}
+
+// Implement PushInterface
+func (pm *PushManager) PushMany(ctx context.Context, pushlist []cid.Cid) error {
+	entries := make([]Entry, 0, len(pushlist))
+	for _, c := range pushlist {
+		log.Debug("push ", c)
+		entries = append(entries, Entry{
+			Cid:      c,
+			Priority: 0,
+		})
+	}
 
 	select {
-	case pm.mq <- &pushSet{targets: entries, from: 0}:
+	case pm.mq <- &pushSet{entries: entries, from: 0}:
 	case <-pm.ctx.Done():
 	case <-ctx.Done():
 	}
@@ -112,17 +146,18 @@ type pushMessage interface {
 }
 
 type pushSet struct {
-	targets []cid.Cid
+	entries []Entry
+	targets []peer.ID
 	from    uint64
 }
 
 func (ps *pushSet) handle(pm *PushManager) {
 	msg := newMsg()
 	// add changes to our wantlist
-	for _, t := range ps.targets {
-		log.Debug("Push", t)
+	for _, e := range ps.entries {
+		log.Debug("Push ", e.Cid)
 
-		msg.AddEntry(t, 1)
+		msg.AddEntry(e.Cid, e.Priority)
 	}
 
 	go pm.pushToPeer(pm.ctx, msg)
@@ -155,7 +190,7 @@ func (pm *PushManager) msgToStream(ctx context.Context, s network.Stream, msg Pu
 		log.Warn("error setting deadline: %s", err)
 	}
 
-	if err := msg.ToNetV1(s); err != nil {
+	if err := msg.Send(s); err != nil {
 		log.Debugf("error: %s", err)
 		return err
 	}
@@ -185,27 +220,23 @@ func (pm *PushManager) SendMessage(ctx context.Context,	p peer.ID, outgoing Push
 
 }
 
-/*// FindProvidersAsync returns a channel of providers for the given key.
-func (bsnet *impl) FindProvidersAsync(ctx context.Context, k cid.Cid, max int) <-chan peer.ID {
-	out := make(chan peer.ID, max)
-	go func() {
-		defer close(out)
-		providers := bsnet.routing.FindProvidersAsync(ctx, k, max)
-		for info := range providers {
-			if info.ID == bsnet.host.ID() {
-				continue // ignore self as provider
-			}
-			bsnet.host.Peerstore().AddAddrs(info.ID, info.Addrs, peerstore.TempAddrTTL)
-			select {
-			case <-ctx.Done():
-				return
-			case out <- info.ID:
-			}
-		}
-	}()
-	return out
+// Provide provides the key to the network
+func (pm *PushManager) Provide(ctx context.Context, k cid.Cid) error {
+	return pm.routing.Provide(ctx, k, true)
 }
-*/
+
+// ledger lazily instantiates a ledger
+func (pm *PushManager) findOrCreateLedger(p peer.ID) *ledger {
+	pm.lock.Lock()
+	defer pm.lock.Unlock()
+	l, ok := pm.ledgerMap[p]
+	if !ok {
+		l = newLedger(p)
+		pm.ledgerMap[p] = l
+	}
+	return l
+}
+
 // handleNewStream receives a new stream from the network.
 func (pm *PushManager) handleNewStream(s network.Stream) {
 	defer s.Close()
@@ -221,7 +252,7 @@ func (pm *PushManager) handleNewStream(s network.Stream) {
 		if err != nil {
 			if err != io.EOF {
 				_ = s.Reset()
-				log.Debugf("bitswap net handleNewStream from %s error: %s", s.Conn().RemotePeer(), err)
+				log.Debugf("pushManager net handleNewStream from %s error: %s", s.Conn().RemotePeer(), err)
 			}
 			return
 		}
@@ -251,33 +282,66 @@ func (pm *PushManager) ResolveCid(Cid cid.Cid) error {
 	if err != nil {
 		return err
 	}
-
 	log.Debug("file size", size)
-
-	r := files.ToFile(file)
-	if r == nil {
-		return errors.New("file is not regular")
-	}
-
-	var buffer [1024000]byte
-	for {
-		n, e := r.Read(buffer[:])
-		log.Debug("read", n, err)
-		if e != nil {
-			break
-		}
-	}
-	r.Close()
 
 	return nil
 }
 
 func (pm *PushManager) ReceiveMessage(ctx context.Context, p peer.ID, incoming PushMessage) {
-	log.Debug("Received", incoming)
-	for _, l := range incoming.Pushlist() {
-		log.Debug("Received", l.Cid)
+	pushlist := incoming.Pushlist()
+	wants := make([]cid.Cid, 0, len(pushlist))
+	for _, l := range pushlist {
+		log.Debug("Received publist req ", l.Cid)
 
-		pm.ResolveCid(l.Cid)
+		has, err := pm.blockstore.Has(l.Cid)
+		if err != nil {
+			log.Debug(err)
+			break
+		}
+
+		if has == false {
+			log.Debug("allow publist ", l.Cid)
+			pm.wantlist[l.Cid] = struct{}{}
+			wants = append(wants, l.Cid)
+		}
+	}
+
+	l := pm.findOrCreateLedger(p)
+	allowlist := incoming.Allowlist()
+	sBlocks := make([]blocks.Block, 0, len(allowlist))
+	for _, allow := range allowlist {
+		log.Debug("Received allow ", allow.Cid)
+
+		b, err := pm.blockstore.Get(allow.Cid)
+		if err != nil {
+			continue
+		}
+		log.Debug("push block  ", allow.Cid)
+		sBlocks = append(sBlocks, b)
+		// update ledger
+		l.SentBytes(len(b.RawData()))
+	}
+
+	if len(wants) > 0  || len(sBlocks) > 0 {
+		pm.PushAll(nil, wants, sBlocks)
+	}
+
+	rblocks := make([]blocks.Block, 0, len(incoming.Blocks()))
+	for _, block := range incoming.Blocks() {
+		log.Debug("Received block  ", block.Cid)
+		_, ok := pm.wantlist[block.Cid()]
+		if ok {
+			delete(pm.wantlist, block.Cid())
+			rblocks = append(rblocks, block)
+
+			// update ledger
+			l.ReceivedBytes(len(block.RawData()))
+
+			go pm.Provide(ctx, block.Cid())
+		}
+	}
+	if len(rblocks) > 0 {
+		pm.blockstore.PutMany(rblocks)
 	}
 }
 
@@ -296,6 +360,15 @@ func (pm *PushManager) PeerConnected(remotePeer peer.ID) {
 	} else {
 		c.ref ++
 	}
+
+	l, ok := pm.ledgerMap[remotePeer]
+	if !ok {
+		l = newLedger(remotePeer)
+		pm.ledgerMap[remotePeer] = l
+	}
+	l.lk.Lock()
+	defer l.lk.Unlock()
+	l.ref++
 }
 
 func (pm *PushManager) PeerDisconnected(remotePeer peer.ID) {

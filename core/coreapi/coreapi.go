@@ -17,6 +17,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	pushmanager "github.com/ipfs/go-ipfs/push"
 
 	bserv "github.com/ipfs/go-blockservice"
 	"github.com/ipfs/go-ipfs-blockstore"
@@ -74,6 +75,8 @@ type CoreAPI struct {
 
 	checkPublishAllowed func() error
 	checkOnline         func(allowOffline bool) error
+
+	pushService     pushmanager.PushInterface
 
 	// ONLY for re-applying options in WithOptions, DO NOT USE ANYWHERE ELSE
 	nd         *core.IpfsNode
@@ -181,6 +184,8 @@ func (api *CoreAPI) WithOptions(opts ...options.ApiOption) (coreiface.CoreAPI, e
 		provider: n.Provider,
 
 		pubSub: n.PubSub,
+
+		pushService: n.PushService,
 
 		nd:         n,
 		parentOpts: settings,
