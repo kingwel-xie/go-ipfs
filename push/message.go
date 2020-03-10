@@ -3,10 +3,8 @@ package pushmanager
 import (
 	"encoding/binary"
 	"fmt"
-	blocks "github.com/ipfs/go-block-format"
-	"io"
-
 	pb "github.com/ipfs/go-ipfs/push/pb"
+	"io"
 
 	cid "github.com/ipfs/go-cid"
 	pool "github.com/libp2p/go-buffer-pool"
@@ -22,11 +20,6 @@ type PushMessage interface {
 	// the sender.
 	Pushlist() []Entry
 
-	Allowlist() []Entry
-
-	// Blocks returns a slice of unique blocks.
-	Blocks() []blocks.Block
-
 	Send(w io.Writer) error
 
 	Loggable() map[string]interface{}
@@ -34,8 +27,6 @@ type PushMessage interface {
 
 type impl struct {
 	pushlist map[cid.Cid]*Entry
-	allowlist map[cid.Cid]*Entry
-	blocks   map[cid.Cid]blocks.Block
 }
 
 // New returns a new, empty bitswap message
@@ -46,8 +37,6 @@ func New() PushMessage {
 func newMsg() *impl {
 	return &impl{
 		pushlist: make(map[cid.Cid]*Entry),
-		allowlist: make(map[cid.Cid]*Entry),
-		blocks: make(map[cid.Cid]blocks.Block),
 	}
 }
 
@@ -66,47 +55,12 @@ func newMessageFromProto(pbm pb.Message) (PushMessage, error) {
 		m.addEntry(c, int(e.Priority))
 	}
 
-	for _, e := range pbm.Allowlist {
-		c, err := cid.Cast([]byte(e.Block))
-		if err != nil {
-			return nil, fmt.Errorf("incorrectly formatted cid in wantlist: %s", err)
-		}
-		m.addAllowEntry(c, int(e.Priority))
-	}
-
-	for _, b := range pbm.GetPayload() {
-		pref, err := cid.PrefixFromBytes(b.GetPrefix())
-		if err != nil {
-			return nil, err
-		}
-
-		c, err := pref.Sum(b.GetData())
-		if err != nil {
-			return nil, err
-		}
-
-		blk, err := blocks.NewBlockWithCid(b.GetData(), c)
-		if err != nil {
-			return nil, err
-		}
-
-		m.AddBlock(blk)
-	}
-
 	return m, nil
 }
 
 func (m *impl) Pushlist() []Entry {
 	out := make([]Entry, 0, len(m.pushlist))
 	for _, e := range m.pushlist {
-		out = append(out, *e)
-	}
-	return out
-}
-
-func (m *impl) Allowlist() []Entry {
-	out := make([]Entry, 0, len(m.allowlist))
-	for _, e := range m.allowlist {
 		out = append(out, *e)
 	}
 	return out
@@ -122,34 +76,10 @@ func (m *impl) addEntry(c cid.Cid, priority int) {
 		e.Priority = priority
 	} else {
 		m.pushlist[c] = &Entry{
-				Cid:      c,
-				Priority: priority,
-		}
-	}
-}
-
-func (m *impl) addAllowEntry(c cid.Cid, priority int) {
-	e, exists := m.allowlist[c]
-	if exists {
-		e.Priority = priority
-	} else {
-		m.allowlist[c] = &Entry{
 			Cid:      c,
 			Priority: priority,
 		}
 	}
-}
-
-func (m *impl) Blocks() []blocks.Block {
-	bs := make([]blocks.Block, 0, len(m.blocks))
-	for _, block := range m.blocks {
-		bs = append(bs, block)
-	}
-	return bs
-}
-
-func (m *impl) AddBlock(b blocks.Block) {
-	m.blocks[b.Cid()] = b
 }
 
 // FromNet generates a new BitswapMessage from incoming data on an io.Reader.
@@ -184,23 +114,6 @@ func (m *impl) encode() *pb.Message {
 			Priority: int32(e.Priority),
 		})
 	}
-
-	pbm.Allowlist = make([]pb.Message_Entry, 0, len(m.allowlist))
-	for _, e := range m.allowlist {
-		pbm.Allowlist = append(pbm.Allowlist, pb.Message_Entry{
-			Block:    e.Cid.Bytes(),
-			Priority: int32(e.Priority),
-		})
-	}
-
-	blocks := m.Blocks()
-	pbm.Payload = make([]pb.Message_Block, 0, len(blocks))
-	for _, b := range blocks {
-		pbm.Payload = append(pbm.Payload, pb.Message_Block{
-			Data:   b.RawData(),
-			Prefix: b.Cid().Prefix().Bytes(),
-		})
-	}
 	return pbm
 }
 
@@ -226,8 +139,69 @@ func write(w io.Writer, m *pb.Message) error {
 	return err
 }
 
+func Recv(s network.Stream) (bool, error) {
+	reader := msgio.NewVarintReaderSize(s, network.MessageSizeMax)
+	msg, err := reader.ReadMsg()
+	if err != nil {
+		if err != io.EOF {
+			_ = s.Reset()
+			log.Debugf("pushManager net handleNewStream from %s error: %s", s.Conn().RemotePeer(), err)
+		}
+		return false, err
+	}
+
+	var pb pb.RespMsg
+	err = pb.Unmarshal(msg)
+	if err != nil {
+		return false, err
+	}
+	reader.ReleaseMsg(msg)
+
+	return pb.Accepted, nil
+}
+
 func (m *impl) Loggable() map[string]interface{} {
 	return map[string]interface{}{
 		"push":  m.Pushlist(),
+	}
+}
+
+type resp struct {
+	accepted bool
+}
+
+func (r resp) Pushlist() []Entry {
+	return nil
+}
+
+func (r *resp) encode() *pb.RespMsg {
+	return &pb.RespMsg{Accepted: r.accepted}
+}
+
+func (r *resp) write(w io.Writer, m *pb.RespMsg) error {
+	size := m.Size()
+
+	buf := pool.Get(size + binary.MaxVarintLen64)
+	defer pool.Put(buf)
+
+	n := binary.PutUvarint(buf, uint64(size))
+
+	written, err := m.MarshalTo(buf[n:])
+	if err != nil {
+		return err
+	}
+	n += written
+
+	_, err = w.Write(buf[:n])
+	return err
+}
+
+func (r resp) Send(w io.Writer) error {
+	return r.write(w, r.encode())
+}
+
+func (r resp) Loggable() map[string]interface{} {
+	return map[string]interface{}{
+		"accepted": r.accepted,
 	}
 }

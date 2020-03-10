@@ -7,7 +7,6 @@ import (
 	pushmanager "github.com/ipfs/go-ipfs/push"
 	format "github.com/ipfs/go-ipld-format"
 	"github.com/libp2p/go-libp2p-core/host"
-	"github.com/libp2p/go-libp2p-core/routing"
 	"go.uber.org/fx"
 
 	"github.com/libp2p/go-libp2p-core/crypto"
@@ -35,8 +34,8 @@ func PrivateKey(sk crypto.PrivKey) func(id peer.ID) (crypto.PrivKey, error) {
 	}
 }
 
-func PushInterface(mctx helpers.MetricsCtx, lc fx.Lifecycle, host host.Host, rt routing.Routing, dag format.DAGService, bs blockstore.GCBlockstore) pushmanager.PushInterface {
-	return pushmanager.NewPushManager(helpers.LifecycleCtx(mctx, lc), host, rt, dag, bs)
+func PushInterface(mctx helpers.MetricsCtx, lc fx.Lifecycle, host host.Host, dag format.DAGService, bs blockstore.GCBlockstore) pushmanager.PushInterface {
+	return pushmanager.NewPushManager(helpers.LifecycleCtx(mctx, lc), host, dag, bs)
 }
 
 func PushInterface2(host host.Host) func() (pushmanager.PushInterface, error) {

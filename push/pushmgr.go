@@ -2,12 +2,15 @@ package pushmanager
 
 import (
 	"context"
-	blocks "github.com/ipfs/go-block-format"
 	blockstore "github.com/ipfs/go-ipfs-blockstore"
+	files "github.com/ipfs/go-ipfs-files"
 	format "github.com/ipfs/go-ipld-format"
 	dag "github.com/ipfs/go-merkledag"
 	unixfile "github.com/ipfs/go-unixfs/file"
+	"io/ioutil"
+	"sort"
 
+	"errors"
 	"io"
 	"sync"
 	"time"
@@ -19,7 +22,6 @@ import (
 	"github.com/libp2p/go-libp2p-core/network"
 	"github.com/libp2p/go-libp2p-core/peer"
 	"github.com/libp2p/go-libp2p-core/protocol"
-	"github.com/libp2p/go-libp2p-core/routing"
 	msgio "github.com/libp2p/go-msgio"
 	ma "github.com/multiformats/go-multiaddr"
 )
@@ -41,10 +43,8 @@ type peerInstance struct {
 // The PushManager
 type PushManager struct {
 	host      	host.Host
-	routing 	routing.ContentRouting
 	dag			format.DAGService
 	blockstore	blockstore.Blockstore
-	wantlist	map[cid.Cid]struct{}
 
 	protocolId 	protocol.ID
 
@@ -53,25 +53,17 @@ type PushManager struct {
 	lock sync.Mutex // protects the connection map below
 	connMap map[peer.ID]*peerInstance
 
-	// ledgerMap lists Ledgers by their Partner key.
-	ledgerMap map[peer.ID]*ledger
-
-	addrMu sync.Mutex
-
 	mq chan pushMessage
 }
 
 // NewPushManager returns a PushManager supported by underlying IPFS host.
-func NewPushManager(parent context.Context, host host.Host, rt routing.Routing, dag format.DAGService, bs blockstore.Blockstore) *PushManager {
+func NewPushManager(parent context.Context, host host.Host, dag format.DAGService, bs blockstore.Blockstore) *PushManager {
 	pm := &PushManager{
 		host:    host,
-		routing:	rt,
 		dag:	dag,
 		blockstore:		bs,
-		wantlist:	make(map[cid.Cid]struct{}),
 		protocolId:       protocolId,
 		connMap:	make(map[peer.ID]*peerInstance, 100),
-		ledgerMap:	make(map[peer.ID]*ledger, 100),
 		ctx:	parent,
 		mq:	make(chan pushMessage),
 	}
@@ -87,35 +79,17 @@ func NewPushManager(parent context.Context, host host.Host, rt routing.Routing, 
 
 // Implement PushInterface
 func (pm *PushManager) Push(ctx context.Context, c cid.Cid) error {
-	return pm.PushMany(ctx, []cid.Cid{c})
-}
-
-func (pm *PushManager) PushAll(pushlist []cid.Cid, allowlist []cid.Cid, bs []blocks.Block) {
-	msg := newMsg()
-
-	for _, e := range pushlist {
-		msg.AddEntry(e, 1)
-	}
-
-	for _, e := range allowlist {
-		msg.addAllowEntry(e, 1)
-	}
-
-	for _, b := range bs {
-		msg.AddBlock(b)
-	}
-
-	go pm.pushToPeer(pm.ctx, msg)
+	return pm.PushMany(ctx, []cid.Cid{c}, false)
 }
 
 // Implement PushInterface
-func (pm *PushManager) PushMany(ctx context.Context, pushlist []cid.Cid) error {
+func (pm *PushManager) PushMany(ctx context.Context, pushlist []cid.Cid, accepted bool) error {
 	entries := make([]Entry, 0, len(pushlist))
 	for _, c := range pushlist {
 		log.Debug("push ", c)
 		entries = append(entries, Entry{
-			Cid:      c,
-			Priority: 0,
+			Cid:c,
+			Priority:0,
 		})
 	}
 
@@ -163,21 +137,49 @@ func (ps *pushSet) handle(pm *PushManager) {
 	go pm.pushToPeer(pm.ctx, msg)
 }
 
-func (pm *PushManager) pushToPeer(ctx context.Context, msg PushMessage) {
+type peerData struct {
+	latency	time.Duration
+	pid 	peer.ID
+}
 
+type peersData []peerData
+
+func (pd peersData) Len() int {
+	return len(pd)
+}
+
+func (pd peersData) Less(i, j int) bool {
+	return pd[i].latency < pd[j].latency
+}
+
+func (pd peersData) Swap(i, j int) {
+	pd[i], pd[j] = pd[j], pd[i]
+}
+
+func (pm *PushManager) pushToPeer(ctx context.Context, msg PushMessage) {
 	//pm.getMostWantedPeer()
 	if len(pm.connMap) == 0 {
 		log.Warn("Peer connection unavailable")
 		return
 	}
 
-	var pid peer.ID
-	for k,_ := range pm.connMap {
-		pid = k
-		break
+	peers := make(peersData, 0)
+	for pid, _ := range pm.connMap {
+		latency := pm.host.Peerstore().LatencyEWMA(pid)
+		peers = append(peers, peerData{
+			latency: latency,
+			pid:     pid,
+		})
 	}
 
-	pm.SendMessage(pm.ctx, pid, msg)
+	sort.Sort(peers)
+
+	for _, pd := range peers {
+		accepted, err := pm.SendAndRecvMsg(ctx, pd.pid, msg)
+		if accepted || err != nil {
+			return
+		}
+	}
 }
 
 func (pm *PushManager) msgToStream(ctx context.Context, s network.Stream, msg PushMessage) error {
@@ -201,40 +203,29 @@ func (pm *PushManager) msgToStream(ctx context.Context, s network.Stream, msg Pu
 	return nil
 }
 
-func (pm *PushManager) SendMessage(ctx context.Context,	p peer.ID, outgoing PushMessage) error {
+func (pm *PushManager) SendAndRecvMsg(ctx context.Context,	p peer.ID, outgoing PushMessage) (bool, error) {
 	s, err := pm.host.NewStream(ctx, p, pm.protocolId)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	if err = pm.msgToStream(ctx, s, outgoing); err != nil {
 		_ = s.Reset()
-		return err
+		return false, err
 	}
+
+	accepted, err := Recv(s)
+	if err != nil {
+		return false, err
+	}
+	log.Debugf("peer %s accept %t\n", p.Pretty(), accepted)
 	//atomic.AddUint64(&bsnet.stats.MessagesSent, 1)
 
 	// TODO(https://github.com/libp2p/go-libp2p-net/issues/28): Avoid this goroutine.
 	//nolint
 	go helpers.AwaitEOF(s)
-	return s.Close()
+	return accepted, s.Close()
 
-}
-
-// Provide provides the key to the network
-func (pm *PushManager) Provide(ctx context.Context, k cid.Cid) error {
-	return pm.routing.Provide(ctx, k, true)
-}
-
-// ledger lazily instantiates a ledger
-func (pm *PushManager) findOrCreateLedger(p peer.ID) *ledger {
-	pm.lock.Lock()
-	defer pm.lock.Unlock()
-	l, ok := pm.ledgerMap[p]
-	if !ok {
-		l = newLedger(p)
-		pm.ledgerMap[p] = l
-	}
-	return l
 }
 
 // handleNewStream receives a new stream from the network.
@@ -260,7 +251,7 @@ func (pm *PushManager) handleNewStream(s network.Stream) {
 		p := s.Conn().RemotePeer()
 		ctx := context.Background()
 		log.Debugf("pushmanager net handleNewStream from %s", s.Conn().RemotePeer())
-		pm.ReceiveMessage(ctx, p, received)
+		pm.ReceiveMessage(ctx, p, s, received)
 		//atomic.AddUint64(&bsnet.stats.MessagesRecvd, 1)
 	}
 }
@@ -277,21 +268,32 @@ func (pm *PushManager) ResolveCid(Cid cid.Cid) error {
 	}
 
 	file, err := unixfile.NewUnixfsFile(ctx, dagRO, node)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
 
 	size, err := file.Size()
 	if err != nil {
 		return err
 	}
-	log.Debug("file size", size)
+	log.Debug("file size: ", size)
+
+	r := files.ToFile(file)
+	if r == nil {
+		return errors.New("file is not regular")
+	}
+
+	ioutil.ReadAll(r)
 
 	return nil
 }
 
-func (pm *PushManager) ReceiveMessage(ctx context.Context, p peer.ID, incoming PushMessage) {
+func (pm *PushManager) ReceiveMessage(ctx context.Context, p peer.ID, s network.Stream, incoming PushMessage) {
 	pushlist := incoming.Pushlist()
 	wants := make([]cid.Cid, 0, len(pushlist))
 	for _, l := range pushlist {
-		log.Debug("Received publist req ", l.Cid)
+		log.Debug("Received publist ", l.Cid)
 
 		has, err := pm.blockstore.Has(l.Cid)
 		if err != nil {
@@ -300,49 +302,16 @@ func (pm *PushManager) ReceiveMessage(ctx context.Context, p peer.ID, incoming P
 		}
 
 		if has == false {
-			log.Debug("allow publist ", l.Cid)
-			pm.wantlist[l.Cid] = struct{}{}
+			log.Debug("accept publist ", l.Cid)
 			wants = append(wants, l.Cid)
+			go pm.ResolveCid(l.Cid)
+		} else {
+			log.Debug("Don't accept, block is existed in blockstore")
 		}
 	}
 
-	l := pm.findOrCreateLedger(p)
-	allowlist := incoming.Allowlist()
-	sBlocks := make([]blocks.Block, 0, len(allowlist))
-	for _, allow := range allowlist {
-		log.Debug("Received allow ", allow.Cid)
-
-		b, err := pm.blockstore.Get(allow.Cid)
-		if err != nil {
-			continue
-		}
-		log.Debug("push block  ", allow.Cid)
-		sBlocks = append(sBlocks, b)
-		// update ledger
-		l.SentBytes(len(b.RawData()))
-	}
-
-	if len(wants) > 0  || len(sBlocks) > 0 {
-		pm.PushAll(nil, wants, sBlocks)
-	}
-
-	rblocks := make([]blocks.Block, 0, len(incoming.Blocks()))
-	for _, block := range incoming.Blocks() {
-		log.Debug("Received block  ", block.Cid)
-		_, ok := pm.wantlist[block.Cid()]
-		if ok {
-			delete(pm.wantlist, block.Cid())
-			rblocks = append(rblocks, block)
-
-			// update ledger
-			l.ReceivedBytes(len(block.RawData()))
-
-			go pm.Provide(ctx, block.Cid())
-		}
-	}
-	if len(rblocks) > 0 {
-		pm.blockstore.PutMany(rblocks)
-	}
+	accepted := len(wants) > 0
+	pm.msgToStream(ctx, s, resp{accepted:accepted})
 }
 
 func (pm *PushManager) PeerConnected(remotePeer peer.ID) {
@@ -360,15 +329,6 @@ func (pm *PushManager) PeerConnected(remotePeer peer.ID) {
 	} else {
 		c.ref ++
 	}
-
-	l, ok := pm.ledgerMap[remotePeer]
-	if !ok {
-		l = newLedger(remotePeer)
-		pm.ledgerMap[remotePeer] = l
-	}
-	l.lk.Lock()
-	defer l.lk.Unlock()
-	l.ref++
 }
 
 func (pm *PushManager) PeerDisconnected(remotePeer peer.ID) {

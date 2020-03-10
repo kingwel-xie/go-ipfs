@@ -4,18 +4,14 @@ package pushmanager.message.pb;
 
 import "github.com/gogo/protobuf/gogoproto/gogo.proto";
 
-message Message {
+message message {
     message Entry {
         bytes block = 1;		// the block cid (cidV0 in bitswap 1.0.0, cidV1 in bitswap 1.1.0)
         int32 priority = 2;	// the priority (normalized). default to 1
     }
-
-    message Block {
-        bytes prefix = 1;		// CID prefix (cid version, multicodec and multihash prefix (type + length)
-        bytes data = 2;
-    }
-
     repeated Entry pushlist = 1 [(gogoproto.nullable) = false];	// a list of pushlist entries
-    repeated Entry allowlist = 2 [(gogoproto.nullable) = false];	// a list of wantlist entries
-    repeated Block payload = 3 [(gogoproto.nullable) = false];		// used to send Blocks in bitswap 1.1.0
+}
+
+message respMsg {
+    bool accepted = 1;
 }
