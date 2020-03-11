@@ -13,10 +13,10 @@ import (
 	"github.com/libp2p/go-libp2p-core/network"
 )
 
-// BitSwapMessage is the basic interface for interacting building, encoding,
-// and decoding messages sent on the BitSwap protocol.
+// PushMessage is the basic interface for interacting building, encoding,
+// and decoding messages sent on the PushManager.
 type PushMessage interface {
-	// Wantlist returns a slice of unique keys that represent data wanted by
+	// Pushlist returns a slice of unique keys that represent data wanted by
 	// the sender.
 	Pushlist() []Entry
 
@@ -139,27 +139,6 @@ func write(w io.Writer, m *pb.Message) error {
 	return err
 }
 
-func Recv(s network.Stream) (bool, error) {
-	reader := msgio.NewVarintReaderSize(s, network.MessageSizeMax)
-	msg, err := reader.ReadMsg()
-	if err != nil {
-		if err != io.EOF {
-			_ = s.Reset()
-			log.Debugf("pushManager net handleNewStream from %s error: %s", s.Conn().RemotePeer(), err)
-		}
-		return false, err
-	}
-
-	var pb pb.RespMsg
-	err = pb.Unmarshal(msg)
-	if err != nil {
-		return false, err
-	}
-	reader.ReleaseMsg(msg)
-
-	return pb.Accepted, nil
-}
-
 func (m *impl) Loggable() map[string]interface{} {
 	return map[string]interface{}{
 		"push":  m.Pushlist(),
@@ -168,6 +147,10 @@ func (m *impl) Loggable() map[string]interface{} {
 
 type resp struct {
 	accepted bool
+}
+
+func (r resp) Accept() bool {
+	return r.accepted
 }
 
 func (r resp) Pushlist() []Entry {
@@ -198,6 +181,29 @@ func (r *resp) write(w io.Writer, m *pb.RespMsg) error {
 
 func (r resp) Send(w io.Writer) error {
 	return r.write(w, r.encode())
+}
+
+func (r *resp) RecvRsp(s network.Stream) error {
+	reader := msgio.NewVarintReaderSize(s, network.MessageSizeMax)
+	msg, err := reader.ReadMsg()
+	if err != nil {
+		if err != io.EOF {
+			_ = s.Reset()
+			log.Debugf("pushManager net handleNewStream from %s error: %s", s.Conn().RemotePeer(), err)
+		}
+		return err
+	}
+
+	var pb pb.RespMsg
+	err = pb.Unmarshal(msg)
+	if err != nil {
+		return err
+	}
+	reader.ReleaseMsg(msg)
+
+	r.accepted = pb.Accepted
+
+	return nil
 }
 
 func (r resp) Loggable() map[string]interface{} {

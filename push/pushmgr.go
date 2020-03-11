@@ -129,8 +129,6 @@ func (ps *pushSet) handle(pm *PushManager) {
 	msg := newMsg()
 	// add changes to our wantlist
 	for _, e := range ps.entries {
-		log.Debug("Push ", e.Cid)
-
 		msg.AddEntry(e.Cid, e.Priority)
 	}
 
@@ -174,7 +172,12 @@ func (pm *PushManager) pushToPeer(ctx context.Context, msg PushMessage) {
 
 	sort.Sort(peers)
 
-	for _, pd := range peers {
+	for i, pd := range peers {
+		log.Debugf("index %d peer %s latency %s", i, pd.pid, pd.latency)
+		deadline := time.Now().Add(sendMessageTimeout)
+		ctx, cancel := context.WithDeadline(ctx, deadline)
+		defer cancel()
+
 		accepted, err := pm.SendAndRecvMsg(ctx, pd.pid, msg)
 		if accepted || err != nil {
 			return
@@ -203,7 +206,31 @@ func (pm *PushManager) msgToStream(ctx context.Context, s network.Stream, msg Pu
 	return nil
 }
 
-func (pm *PushManager) SendAndRecvMsg(ctx context.Context,	p peer.ID, outgoing PushMessage) (bool, error) {
+func (pm *PushManager) ReceiveResponse(ctx context.Context, s network.Stream) (bool, error) {
+	deadline := time.Now().Add(sendMessageTimeout)
+	if dl, ok := ctx.Deadline(); ok {
+		deadline = dl
+	}
+
+	if err := s.SetReadDeadline(deadline); err != nil {
+		log.Warn("error setting deadline: %s", err)
+	}
+
+	var rsp resp
+	err := rsp.RecvRsp(s)
+	if err != nil {
+		log.Debug("error: ", err)
+		return false, err
+	}
+
+	if err := s.SetReadDeadline(time.Time{}); err != nil {
+		log.Warn("error resetting deadline: %s", err)
+	}
+
+	return rsp.Accept(), nil
+}
+
+func (pm *PushManager) SendAndRecvMsg(ctx context.Context, p peer.ID, outgoing PushMessage) (bool, error) {
 	s, err := pm.host.NewStream(ctx, p, pm.protocolId)
 	if err != nil {
 		return false, err
@@ -214,18 +241,17 @@ func (pm *PushManager) SendAndRecvMsg(ctx context.Context,	p peer.ID, outgoing P
 		return false, err
 	}
 
-	accepted, err := Recv(s)
+	accepted, err := pm.ReceiveResponse(ctx, s)
 	if err != nil {
 		return false, err
 	}
-	log.Debugf("peer %s accept %t\n", p.Pretty(), accepted)
+	log.Debugf("peer %s accept %t", p.Pretty(), accepted)
 	//atomic.AddUint64(&bsnet.stats.MessagesSent, 1)
 
 	// TODO(https://github.com/libp2p/go-libp2p-net/issues/28): Avoid this goroutine.
 	//nolint
 	go helpers.AwaitEOF(s)
 	return accepted, s.Close()
-
 }
 
 // handleNewStream receives a new stream from the network.
@@ -315,7 +341,7 @@ func (pm *PushManager) ReceiveMessage(ctx context.Context, p peer.ID, s network.
 }
 
 func (pm *PushManager) PeerConnected(remotePeer peer.ID) {
-	log.Debug("Peer connected", remotePeer)
+	log.Debugf("Peer %s connected", remotePeer)
 	pm.lock.Lock()
 	defer pm.lock.Unlock()
 
@@ -332,7 +358,7 @@ func (pm *PushManager) PeerConnected(remotePeer peer.ID) {
 }
 
 func (pm *PushManager) PeerDisconnected(remotePeer peer.ID) {
-	log.Debug("Peer disconnected", remotePeer)
+	log.Debugf("Peer %s disconnected", remotePeer)
 	pm.lock.Lock()
 	defer pm.lock.Unlock()
 
