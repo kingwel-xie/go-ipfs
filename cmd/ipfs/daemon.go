@@ -33,6 +33,7 @@ import (
 	mprome "github.com/ipfs/go-metrics-prometheus"
 	options "github.com/ipfs/interface-go-ipfs-core/options"
 	goprocess "github.com/jbenet/goprocess"
+	"github.com/kingwel-xie/xcli"
 	ma "github.com/multiformats/go-multiaddr"
 	manet "github.com/multiformats/go-multiaddr/net"
 	prometheus "github.com/prometheus/client_golang/prometheus"
@@ -442,6 +443,14 @@ func daemonFunc(req *cmds.Request, re cmds.ResponseEmitter, env cmds.Environment
 	// The daemon is *finally* ready.
 	fmt.Printf("Daemon is ready\n")
 	notifyReady()
+
+	pnode := xcli.P2PNode{
+		Host: node.PeerHost,
+		Dht:  node.DHT.WAN,
+		Ds:   nil,
+	}
+
+	xcli.RunP2PNodeCLI(&pnode)
 
 	// Give the user some immediate feedback when they hit C-c
 	go func() {

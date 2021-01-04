@@ -26,7 +26,7 @@ func Security(enabled bool, tptConfig config.Transports) interface{} {
 			opt:             libp2p.Security(tls.ID, tls.New),
 		}, {
 			priority:        tptConfig.Security.SECIO,
-			defaultPriority: config.Disabled,
+			defaultPriority: 200, //config.Disabled,
 			opt:             libp2p.Security(secio.ID, secio.New),
 		}, {
 			priority:        tptConfig.Security.Noise,
