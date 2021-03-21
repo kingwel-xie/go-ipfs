@@ -482,6 +482,7 @@ github.com/julienschmidt/httprouter v1.2.0/go.mod h1:SYymIcj16QtmaHHD7aYtjjsJG7V
 github.com/kami-zh/go-capturer v0.0.0-20171211120116-e492ea43421d/go.mod h1:P2viExyCEfeWGU259JnaQ34Inuec4R38JCyBx2edgD0=
 github.com/kingwel-xie/readline v1.5.0/go.mod h1:cJYiz1RHQIlJuTysk8/UO7XVAei1Sj6Ar2Fv0w1WT0Q=
 github.com/kingwel-xie/xcli v1.6.0/go.mod h1:BTB31mCAlsajCRxCqX2yftf/MDynmDcfl7lOqHWKaII=
+github.com/kingwel-xie/xcli v1.7.0/go.mod h1:BTB31mCAlsajCRxCqX2yftf/MDynmDcfl7lOqHWKaII=
 github.com/kisielk/errcheck v1.1.0/go.mod h1:EZBBE59ingxPouuu3KfxchcWSUPOHkagtvWXihfKN4Q=
 github.com/kisielk/errcheck v1.2.0/go.mod h1:/BMXB+zMLi60iA8Vv6Ksmxu/1UDYcXs4uQLJ+jE2L00=
 github.com/kisielk/gotool v1.0.0/go.mod h1:XhKaO+MFFWcvkIS/tQcRk01m1F5IRFswLeQ+oQHNcck=

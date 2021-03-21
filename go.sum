@@ -526,6 +526,8 @@ github.com/kingwel-xie/readline v1.5.0 h1:yno9PHnK9iM94H2PBZamwZPxvYmHunzjb47QBu
 github.com/kingwel-xie/readline v1.5.0/go.mod h1:cJYiz1RHQIlJuTysk8/UO7XVAei1Sj6Ar2Fv0w1WT0Q=
 github.com/kingwel-xie/xcli v1.6.0 h1:IXnJM2H3wp5iyWksvOz8c7JCRi5lTj0hSu55kqolBYs=
 github.com/kingwel-xie/xcli v1.6.0/go.mod h1:BTB31mCAlsajCRxCqX2yftf/MDynmDcfl7lOqHWKaII=
+github.com/kingwel-xie/xcli v1.7.0 h1:9dCC/kPALn3239OluYgTbLJFNt3zSZoPn7VcFiFNwYM=
+github.com/kingwel-xie/xcli v1.7.0/go.mod h1:BTB31mCAlsajCRxCqX2yftf/MDynmDcfl7lOqHWKaII=
 github.com/kisielk/errcheck v1.1.0/go.mod h1:EZBBE59ingxPouuu3KfxchcWSUPOHkagtvWXihfKN4Q=
 github.com/kisielk/errcheck v1.2.0 h1:reN85Pxc5larApoH1keMBiu2GWtPqXQ1nc9gx+jOU+E=
 github.com/kisielk/errcheck v1.2.0/go.mod h1:/BMXB+zMLi60iA8Vv6Ksmxu/1UDYcXs4uQLJ+jE2L00=

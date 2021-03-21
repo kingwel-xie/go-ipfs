@@ -447,7 +447,7 @@ func daemonFunc(req *cmds.Request, re cmds.ResponseEmitter, env cmds.Environment
 	pnode := xcli.P2PNode{
 		Host: node.PeerHost,
 		Dht:  node.DHT.WAN,
-		Ds:   nil,
+		Ds:   node.Repo.Datastore(),
 	}
 
 	xcli.RunP2PNodeCLI(&pnode)
